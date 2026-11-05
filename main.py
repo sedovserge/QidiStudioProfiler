@@ -121,6 +121,46 @@ def save_json(path, data):
         f.write("\n")
 
 
+APPCONFIG_CHECKSUM_PREFIX = "# MD5 checksum "
+
+
+def load_appconfig(path):
+    """Load QIDIStudio.conf: JSON body followed by an optional MD5 checksum line."""
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    pos = text.rfind(APPCONFIG_CHECKSUM_PREFIX)
+    if pos >= 0:
+        text = text[:pos]
+    return json.loads(text, object_pairs_hook=OrderedDict)
+
+
+def save_appconfig(path, data):
+    """Save QIDIStudio.conf the way QIDIStudio does: CRLF, 4-space indent, MD5 trailer.
+
+    The checksum is MD5 of the JSON body with LF line endings and no trailing newline.
+    """
+    body = json.dumps(data, indent=4, ensure_ascii=False)
+    checksum = hashlib.md5(body.encode("utf-8")).hexdigest().upper()
+    content = f"{body}\n{APPCONFIG_CHECKSUM_PREFIX}{checksum}\n"
+    with open(path, "w", encoding="utf-8", newline="\r\n") as f:
+        f.write(content)
+
+
+def is_qidistudio_running():
+    """Return True if qidi-studio.exe is running (Windows only)."""
+    if sys.platform != "win32":
+        return False
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq qidi-studio.exe", "/NH"],
+            capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW,
+        ).stdout
+    except OSError:
+        return False
+    return "qidi-studio.exe" in out.lower()
+
+
 def generate_ids(filament_type):
     """Generate unique filament_id and setting_id from type name."""
     h = hashlib.md5(filament_type.encode()).hexdigest()[:6].upper()
@@ -532,7 +572,21 @@ class MainWindow(QWidget):
                 dst = backup_dir / f"{src.stem}_{ts}{src.suffix}"
                 shutil.copy2(src, dst)
 
+    def _ensure_studio_closed(self):
+        """Warn and return False if QIDIStudio is running (it rewrites the conf on exit)."""
+        if is_qidistudio_running():
+            QMessageBox.warning(
+                self,
+                "QIDIStudio запущена",
+                "Закройте QIDIStudio и повторите.\n\n"
+                "Студия перезаписывает QIDIStudio.conf при выходе, и изменения будут потеряны.",
+            )
+            return False
+        return True
+
     def _on_create(self):
+        if not self._ensure_studio_closed():
+            return
         idx = self.combo_base.currentIndex()
         if idx < 0:
             QMessageBox.warning(self, "Ошибка", "Выберите базовый профиль.")
@@ -681,6 +735,8 @@ class MainWindow(QWidget):
         self._load_advanced_list()
 
     def _on_delete(self):
+        if not self._ensure_studio_closed():
+            return
         selected = self.advanced_list.selectedItems()
         if not selected:
             QMessageBox.warning(self, "Ошибка", "Выберите профили для удаления.")
@@ -753,16 +809,16 @@ class MainWindow(QWidget):
                 conf_path = self.qidi_dir / "QIDIStudio.conf"
                 if conf_path.is_file():
                     try:
-                        conf = load_json_ordered(conf_path)
-                        filaments = conf.get("filaments", [])
-                        filaments = [
-                            name for name in filaments
-                            if name not in appconfig_names_to_remove
-                        ]
-                        conf["filaments"] = filaments
-                        save_json(conf_path, conf)
-                    except (json.JSONDecodeError, OSError):
-                        pass
+                        conf = load_appconfig(conf_path)
+                    except (json.JSONDecodeError, OSError) as e:
+                        raise RuntimeError(f"не удалось прочитать QIDIStudio.conf: {e}") from e
+                    filaments = conf.get("filaments", [])
+                    filaments = [
+                        name for name in filaments
+                        if name not in appconfig_names_to_remove
+                    ]
+                    conf["filaments"] = filaments
+                    save_appconfig(conf_path, conf)
 
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось удалить:\n{e}")
@@ -852,9 +908,9 @@ class MainWindow(QWidget):
             return
 
         try:
-            conf = load_json_ordered(conf_path)
-        except (json.JSONDecodeError, OSError):
-            return
+            conf = load_appconfig(conf_path)
+        except (json.JSONDecodeError, OSError) as e:
+            raise RuntimeError(f"не удалось прочитать QIDIStudio.conf: {e}") from e
 
         filaments = conf.get("filaments", [])
         existing = set(filaments)
@@ -869,7 +925,7 @@ class MainWindow(QWidget):
 
         if added:
             conf["filaments"] = filaments
-            save_json(conf_path, conf)
+            save_appconfig(conf_path, conf)
 
 
 def main():
